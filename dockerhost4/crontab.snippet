@@ -1,0 +1,5 @@
+# Add with: sudo crontab -e  (root's crontab, since docker exec + the
+# /root/.ssh key both need root)
+
+# Nightly mirror backup at 2am.
+0 2 * * * /opt/immich-taco/backup/backup-immich.sh >> /var/log/immich-backup.log 2>&1
