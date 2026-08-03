@@ -111,7 +111,12 @@ DB_SIZE=$(ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" "du -h '$REMOTE_DB_DI
 # "--link-dest arg does not exist" notice) even though the output is also
 # being captured into a variable.
 log "Syncing fileserver4 mount ($FILESERVER_MOUNT) into snapshot $DATE..."
-RSYNC_STATS="$(rsync -a --delete --link-dest="../latest" --stats -e "$RSYNC_RSH" \
+# lost+found is a filesystem-reserved directory (every ext4/ZFS volume has
+# one), typically root-only at the actual filesystem level and irrelevant
+# over a network mount regardless -- excluded rather than worked around,
+# since it holds no real data and its permissions aren't ours to fix here.
+RSYNC_STATS="$(rsync -a --delete --link-dest="../latest" --stats \
+  --exclude="/lost+found" -e "$RSYNC_RSH" \
   "$FILESERVER_MOUNT"/ "$REMOTE_USER@$REMOTE_HOST:$SNAP_DIR"/ | tee /dev/stderr)"
 
 # --- Point "latest" at tonight's snapshot (atomic rename, used as next run's --link-dest base) ---
