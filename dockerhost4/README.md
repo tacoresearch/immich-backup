@@ -41,25 +41,37 @@ around costs a bit more disk but removes that failure mode entirely.
 
 ## Deploy
 
+One-time, on dockerhost4:
+
 ```bash
-sudo mkdir -p /opt/immich-taco/backup
-sudo cp backup-immich.sh prune-snapshots.sh backup-common.sh /opt/immich-taco/backup/
-sudo chmod +x /opt/immich-taco/backup/backup-immich.sh /opt/immich-taco/backup/prune-snapshots.sh
+sudo git clone https://github.com/tacoresearch/immich-backup.git /opt/immich-backup
+sudo chmod +x /opt/immich-backup/dockerhost4/{backup-immich.sh,prune-snapshots.sh,update.sh}
 
 sudo crontab -e
-# paste in the contents of crontab.snippet
+# paste in the contents of crontab.snippet (points at /opt/immich-backup/dockerhost4/backup-immich.sh)
 ```
 
-`backup-common.sh` doesn't need `chmod +x`, it's sourced, not executed
-directly. All three files need to stay in the same directory since
-`backup-immich.sh` calls the other two by relative path.
+The repo is public, so no credentials are needed to clone it.
+
+## Updating later
+
+Whenever this repo changes (new script version, retention tweak, whatever),
+pick it up on dockerhost4 with:
+
+```bash
+sudo /opt/immich-backup/dockerhost4/update.sh
+```
+
+That's a `git pull --ff-only` plus re-applying `chmod +x`, no manual
+copying, no remembering which files changed. Nothing needs to be re-added
+to cron, since cron already points at a path inside the cloned repo.
 
 ## First run
 
 Test manually before trusting cron with it:
 
 ```bash
-sudo /opt/immich-taco/backup/backup-immich.sh
+sudo /opt/immich-backup/dockerhost4/backup-immich.sh
 tail -f /var/log/immich-backup.log
 ```
 
