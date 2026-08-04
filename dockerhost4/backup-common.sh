@@ -12,3 +12,7 @@ REMOTE_BASE="/volume1/backups"
 REMOTE_DB_DIR="$REMOTE_BASE/immich/db"
 REMOTE_SNAPSHOT_BASE="$REMOTE_BASE/fileserver4-snapshots"
 REMOTE_LOG_DIR="$REMOTE_BASE/logs"
+# Compose file, .env and resolved image tags, per date. Kept as a sibling of
+# the snapshots rather than inside them so each dated snapshot folder stays a
+# pure mirror of /mnt/fileserver4. Contains secrets, see README.
+REMOTE_HOSTCONFIG_DIR="$REMOTE_BASE/hostconfig"

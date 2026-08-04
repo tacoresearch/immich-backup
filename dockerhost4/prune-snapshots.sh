@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Thins out old fileserver4 snapshots, DB dumps, and summary logs on the NAS.
+# Thins out old fileserver4 snapshots, DB dumps, stack config captures, and
+# summary logs on the NAS.
 # Grandfather-father-son style rotation, never fully deletes history:
 #
 #   age <= KEEP_DAILY days              -> keep every snapshot
@@ -81,9 +82,9 @@ fi
 
 log "Pruning ${#to_delete[@]} of ${#SNAPSHOTS[@]} snapshots (daily<=${KEEP_DAILY}d, weekly<=${KEEP_WEEKLY}w, monthly<=${KEEP_MONTHLY}mo, yearly beyond that)..."
 for d in "${to_delete[@]}"; do
-  log "  removing snapshot $d (and its DB dump + summary log, if present)"
+  log "  removing snapshot $d (and its DB dump + stack config + summary log, if present)"
   ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" \
-    "rm -rf -- '$REMOTE_SNAPSHOT_BASE/$d'; rm -f -- '$REMOTE_DB_DIR/immich_db_$d.sql.gz' '$REMOTE_LOG_DIR/backup_$d.log'"
+    "rm -rf -- '$REMOTE_SNAPSHOT_BASE/$d' '$REMOTE_HOSTCONFIG_DIR/$d'; rm -f -- '$REMOTE_DB_DIR/immich_db_$d.sql.gz' '$REMOTE_LOG_DIR/backup_$d.log'"
 done
 
 log "Prune complete."

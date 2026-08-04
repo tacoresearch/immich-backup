@@ -17,12 +17,18 @@
 #   1. Immich Postgres dump (pg_dumpall, per Immich's own documented
 #      backup method), dated + gzipped ->
 #      /volume1/backups/immich/db/immich_db_YYYY-MM-DD.sql.gz
-#   2. The entire /mnt/fileserver4 mount, dated ->
+#   2. The Immich stack's own config (compose file, .env, resolved image
+#      tags), dated ->
+#      /volume1/backups/hostconfig/YYYY-MM-DD/
+#      None of this lives under /mnt/fileserver4, so without it a
+#      "the whole VM is gone" restore would have the photos and the
+#      database but nothing to run them in.
+#   3. The entire /mnt/fileserver4 mount, dated ->
 #      /volume1/backups/fileserver4-snapshots/YYYY-MM-DD/
 #      (Immich's UPLOAD_LOCATION is /mnt/fileserver4/immich/uploads, i.e.
 #      already inside this mount, so it rides along here rather than
 #      getting a separate, duplicate sync.)
-#   3. A summary log for this run ->
+#   4. A summary log for this run ->
 #      /volume1/backups/logs/backup_YYYY-MM-DD.log
 #
 # Retention isn't a flat cutoff: prune-snapshots.sh (run automatically
@@ -95,7 +101,7 @@ if ! ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" true; then
 fi
 
 ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" \
-  "mkdir -p '$REMOTE_DB_DIR' '$REMOTE_SNAPSHOT_BASE' '$REMOTE_LOG_DIR'"
+  "mkdir -p '$REMOTE_DB_DIR' '$REMOTE_SNAPSHOT_BASE' '$REMOTE_LOG_DIR' '$REMOTE_HOSTCONFIG_DIR'"
 
 # --- 1. Database dump, dated, streamed straight to the NAS (atomic: .tmp then remote mv) ---
 log "Dumping Immich Postgres database ($DB_CONTAINER)..."
@@ -105,7 +111,70 @@ docker exec -t "$DB_CONTAINER" pg_dumpall --clean --if-exists --username="$DB_US
       "cat > '$REMOTE_DB_DIR/immich_db_$DATE.sql.gz.tmp' && mv '$REMOTE_DB_DIR/immich_db_$DATE.sql.gz.tmp' '$REMOTE_DB_DIR/immich_db_$DATE.sql.gz'"
 DB_SIZE=$(ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" "du -h '$REMOTE_DB_DIR/immich_db_$DATE.sql.gz'" | cut -f1)
 
-# --- 2. Entire fileserver4 mount, as a dated snapshot (covers Immich's library, see header note) ---
+# --- 2. The Immich stack's own config ---
+# DB_PASSWORD, UPLOAD_LOCATION and the exact image tags all live in
+# $IMMICH_DIR, which is outside /mnt/fileserver4 and therefore in no
+# snapshot. Without them a rebuild-from-scratch restore stalls on
+# "what password did the database have?".
+#
+# Deliberately a whitelist of filenames rather than the whole directory:
+# Immich's default DB_DATA_LOCATION is ./postgres, i.e. the live Postgres
+# data directory sits in here too, and we already have a logical dump of
+# that. Copying it would be gigabytes of redundant, crash-inconsistent data.
+#
+# This runs before the multi-hour rsync on purpose, so a failure here costs
+# seconds rather than surfacing at the end of the night.
+#
+# NOTE: .env holds DB_PASSWORD in plaintext, so the remote copy is mode 600
+# inside a 700 directory. See the README note about this.
+log "Capturing Immich stack config from $IMMICH_DIR..."
+HOSTCONFIG_DIR="$REMOTE_HOSTCONFIG_DIR/$DATE"
+ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" \
+  "mkdir -p '$HOSTCONFIG_DIR' && chmod 700 '$HOSTCONFIG_DIR'"
+
+CONFIG_FILES=()
+for f in docker-compose.yml docker-compose.override.yml .env \
+         hwaccel.transcoding.yml hwaccel.ml.yml; do
+  # if/then rather than `[[ ... ]] &&`, which would make the loop exit
+  # non-zero (and trip set -e) whenever the last filename is absent.
+  if [[ -f "$IMMICH_DIR/$f" ]]; then CONFIG_FILES+=("$f"); fi
+done
+
+for f in "${CONFIG_FILES[@]}"; do
+  ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" \
+    "cat > '$HOSTCONFIG_DIR/$f.tmp' && mv '$HOSTCONFIG_DIR/$f.tmp' '$HOSTCONFIG_DIR/$f' && chmod 600 '$HOSTCONFIG_DIR/$f'" \
+    < "$IMMICH_DIR/$f"
+done
+
+# Resolved image tags AND digests. `:release` is a moving tag, so knowing
+# only the tag doesn't tell a future restore which build was actually
+# running; the digest pins it exactly.
+#
+# Note the default is computed here rather than inline below: an apostrophe
+# inside a "${VAR:-default}" expansion opens a single-quote context and
+# silently eats the rest of the script.
+IMMICH_VERSION_NOTE="${IMMICH_VERSION:-unset, so the compose file default applies}"
+{
+  echo "# Immich stack image versions, captured $(date '+%F %T') on $(hostname)"
+  echo "#"
+  echo "# Pin these when rebuilding. ':release' moves, so restoring months"
+  echo "# from now with a bare ':release' may land on a build newer than the"
+  echo "# database dump expects. Restoring into a NEWER Immich generally"
+  echo "# migrates forward; restoring into an OLDER one does not work."
+  echo "#"
+  echo "# IMMICH_VERSION in .env: $IMMICH_VERSION_NOTE"
+  echo
+  docker ps --filter "name=immich" --format '{{.Names}}' | sort | while IFS= read -r c; do
+    img="$(docker inspect --format '{{.Config.Image}}' "$c" 2>/dev/null || echo '?')"
+    dig="$(docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}n/a{{end}}' "$img" 2>/dev/null || echo 'n/a')"
+    printf '%s\n  image:  %s\n  digest: %s\n' "$c" "$img" "$dig"
+  done
+} | ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" \
+      "cat > '$HOSTCONFIG_DIR/versions.txt.tmp' && mv '$HOSTCONFIG_DIR/versions.txt.tmp' '$HOSTCONFIG_DIR/versions.txt'"
+
+log "  saved to $HOSTCONFIG_DIR: ${CONFIG_FILES[*]} versions.txt"
+
+# --- 3. Entire fileserver4 mount, as a dated snapshot (covers Immich's library, see header note) ---
 # --stats gives the transfer totals used in the summary log below; `tee /dev/stderr`
 # keeps the live warning/summary lines visible (e.g. the expected first-run
 # "--link-dest arg does not exist" notice) even though the output is also
