@@ -1,6 +1,18 @@
 # Add with: sudo crontab -e  (root's crontab, since docker exec + the
 # /root/.ssh key both need root)
-
-# Nightly backup at 2am. Path assumes the repo was cloned to /opt/immich-backup
-# (see README.md) -- adjust if you cloned it somewhere else.
-0 2 * * * /opt/immich-backup/dockerhost4/backup-immich.sh >> /var/log/immich-backup.log 2>&1
+#
+# TIMEZONE: cron reads the *host* clock, not Immich's TZ. dockerhost4 shipped
+# as UTC, which meant this line fired at 10pm Eastern rather than overnight.
+# Set the host to match Immich's .env before relying on the time below:
+#
+#   sudo timedatectl set-timezone America/New_York
+#   sudo systemctl restart cron
+#   timedatectl                                  # confirm
+#
+# 3am, not 2am, on purpose: US daylight-saving transitions happen at exactly
+# 2:00 AM local, so a 2am job sits on the one hour that gets skipped each
+# spring and repeated each fall. 3am is clear of it.
+#
+# Path assumes the repo was cloned to /opt/immich-backup (see README.md),
+# adjust if you cloned it somewhere else.
+0 3 * * * /opt/immich-backup/dockerhost4/backup-immich.sh >> /var/log/immich-backup.log 2>&1

@@ -51,6 +51,10 @@ around costs a bit more disk but removes that failure mode entirely.
 One-time, on dockerhost4:
 
 ```bash
+# Match the host clock to Immich's TZ first -- see "Timezone" below for why
+sudo timedatectl set-timezone America/New_York
+sudo systemctl restart cron
+
 sudo git clone https://github.com/tacoresearch/immich-backup.git /opt/immich-backup
 sudo chmod +x /opt/immich-backup/dockerhost4/{backup-immich.sh,prune-snapshots.sh,update.sh}
 
@@ -59,6 +63,31 @@ sudo crontab -e
 ```
 
 The repo is public, so no credentials are needed to clone it.
+
+### Timezone
+
+dockerhost4 shipped with its system clock on UTC while Immich's `.env` sets
+`TZ=America/New_York`. That split caused two problems worth understanding,
+since both were invisible until they were looked for:
+
+- **cron ran at the wrong time.** cron reads the host clock, so `0 2 * * *`
+  fired at 02:00 UTC, i.e. **10pm Eastern**, not overnight as intended.
+- **Snapshots were named for the wrong day.** `backup-immich.sh` sources
+  Immich's `.env` with `set -a`, which exports `TZ` into the script. Anything
+  evaluating `date` *before* that source ran in UTC; anything after ran in
+  Eastern. A backup starting at 20:29 Eastern was already 00:29 UTC, so it
+  named its snapshot for the following day while its own log lines said
+  otherwise.
+
+The script side is fixed (`DATE` and `START_HUMAN` are now computed after the
+`.env` source, with a comment explaining why the ordering matters). The host
+side is the `timedatectl` command above. With both aligned, the system clock,
+`journalctl`, the cron schedule, the backup log, and the snapshot folder names
+all finally agree.
+
+The schedule is **3am, not 2am**, deliberately: US daylight-saving transitions
+happen at exactly 2:00 AM local, so a 2am job sits on the one hour that is
+skipped each spring and repeated each fall.
 
 ## Updating later
 
@@ -170,6 +199,11 @@ total size is 141,045,744,229  speedup is 1.06
   right.
 - Logs append forever at `/var/log/immich-backup.log`; add a logrotate
   entry if that becomes a problem.
+- cron silently skips a run if the machine happened to be off at 3am, so a
+  VM down overnight for maintenance just quietly has no backup for that day.
+  A systemd timer with `Persistent=true` would catch up on next boot instead,
+  and takes a timezone directly (`OnCalendar=*-*-* 03:00:00 America/New_York`).
+  Worth considering later; it would replace `crontab.snippet` entirely.
 - The `immichbackup` NAS account is in the `administrators` group (created
   that way for rsync/SMB access during setup). Worth a look later at whether
   it can be scoped down to just read/write on the `backups` shared folder.
