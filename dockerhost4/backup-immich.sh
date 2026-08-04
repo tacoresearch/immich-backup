@@ -51,8 +51,9 @@ flock -n 200 || { echo "[$(date '+%F %T')] Another backup run is already in prog
 log() { echo "[$(date '+%F %T')] $*"; }
 trap 'log "Backup FAILED at line $LINENO"' ERR
 
+# Epoch, so it's timezone-independent; the human-readable form is derived
+# from it further down, after .env has set TZ (see the note there).
 START_EPOCH=$(date +%s)
-START_HUMAN=$(date '+%F %T')
 
 # --- Config ---
 IMMICH_DIR="/opt/immich-taco/immich-app"
@@ -62,9 +63,6 @@ ENV_FILE="$IMMICH_DIR/.env"
 DB_CONTAINER="immich_postgres"
 
 FILESERVER_MOUNT="/mnt/fileserver4"
-
-DATE="$(date +%F)"
-SNAP_DIR="$REMOTE_SNAPSHOT_BASE/$DATE"
 
 # --- Pull DB_USERNAME / UPLOAD_LOCATION out of Immich's own .env ---
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -78,6 +76,23 @@ set +a
 
 : "${DB_USERNAME:?DB_USERNAME missing from $ENV_FILE}"
 : "${UPLOAD_LOCATION:?UPLOAD_LOCATION missing from $ENV_FILE}"
+
+# --- Everything below here is timestamped in Immich's timezone, not the host's ---
+# Immich's .env sets TZ, and `set -a` above exported it, so `date` now agrees
+# with the timestamps in this script's own log lines. DATE in particular MUST
+# be computed here rather than before the source: dockerhost4's system clock is
+# UTC, so a run starting at 20:29 Eastern was already 00:29 UTC and named its
+# snapshot for the *following* day, disagreeing with its own log output.
+#
+# START_HUMAN is derived from START_EPOCH rather than a fresh `date` call so it
+# still reflects the true start of the run, just rendered in the right zone.
+#
+# Caveat: the few log lines that can fire before this point (the flock
+# collision message, the missing-.env error) are necessarily still stamped in
+# the host's timezone, since TZ isn't known yet.
+START_HUMAN=$(date -d "@$START_EPOCH" '+%F %T')
+DATE="$(date +%F)"
+SNAP_DIR="$REMOTE_SNAPSHOT_BASE/$DATE"
 
 if [[ "$UPLOAD_LOCATION" != /* ]]; then
   UPLOAD_LOCATION="$IMMICH_DIR/$UPLOAD_LOCATION"
