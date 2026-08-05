@@ -62,6 +62,7 @@ STACK_DIR="/opt/immich-taco/immich-app"
 SNAPSHOT=""
 ASSUME_YES=0
 DRY_RUN=0
+PIN_IMAGES=1
 
 usage() {
   cat <<'USAGE'
@@ -78,6 +79,10 @@ Options:
   --stack-dir <dir> Where to write the restored compose file and .env.
                     Default: /opt/immich-taco/immich-app
   --snapshot <date> Restore a specific YYYY-MM-DD instead of the newest.
+  --no-pin          Pull whatever the compose file's image tags resolve to
+                    today, instead of the exact digests recorded at backup
+                    time. Use this if a pinned pull fails because the registry
+                    no longer has those builds.
   --yes             Skip the confirmation prompt.
   --dry-run         Show what would happen, change nothing.
   -h, --help        This text.
@@ -93,6 +98,7 @@ while [[ $# -gt 0 ]]; do
     --path)      RESTORE_PATH="${2:-}"; shift 2 ;;
     --stack-dir) STACK_DIR="${2:-}"; shift 2 ;;
     --snapshot)  SNAPSHOT="${2:-}"; shift 2 ;;
+    --no-pin)    PIN_IMAGES=0; shift ;;
     --yes)       ASSUME_YES=1; shift ;;
     --dry-run)   DRY_RUN=1; shift ;;
     -h|--help)   usage; exit 0 ;;
@@ -123,7 +129,7 @@ if [[ "$RESTORE_PATH" == /mnt/fileserver4* ]]; then
        Pick a path on this host's own storage."
 fi
 
-for cmd in docker rsync ssh gunzip gzip sed awk df; do
+for cmd in docker rsync ssh gunzip gzip sed awk grep df; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command not found: $cmd"
 done
 
@@ -229,6 +235,7 @@ cat <<SUMMARY
   Database dump     : $DUMP_REMOTE
   Stack config      : $([[ $HAVE_HOSTCONFIG -eq 1 ]] && echo "$HOSTCONFIG_REMOTE" || echo "(none in backup; using existing $STACK_DIR)")
   Stack directory   : $STACK_DIR
+  Image versions    : $([[ $PIN_IMAGES -eq 1 ]] && echo "pinned to the digests captured at backup time" || echo "--no-pin: whatever the compose tags resolve to today")
 
 SUMMARY
 
@@ -314,8 +321,67 @@ gzip -t "$DUMP_LOCAL" || die "$DUMP_LOCAL is corrupt; try an older --snapshot"
 
 dc() { ( cd "$STACK_DIR" && "${DC[@]}" "$@" ); }
 
+# --- Pin images to the builds that produced this dump ----------------------
+# The compose file references moving tags (:v2), which Immich re-points at
+# every release. Pulling those on restore day hands us a NEWER Immich than the
+# dump came from, so the restore and a version upgrade happen simultaneously
+# and any failure is ambiguous between the two. The digests in versions.txt
+# name the exact builds that were running when this backup was taken.
+#
+# Caveat worth understanding: a digest is only as durable as the registry
+# hosting it. If those builds have since been garbage-collected upstream the
+# pull will fail, which is what --no-pin exists for.
+
+PINNED=0
+COMPOSE_FILE="$STACK_DIR/docker-compose.yml"
+
+if [[ $PIN_IMAGES -eq 0 ]]; then
+  log "--no-pin: using the image tags in the compose file as-is."
+elif [[ ! -f "$STACK_DIR/versions.txt" ]]; then
+  warn "no versions.txt in this snapshot, so images cannot be pinned."
+  warn "Falling back to the compose file's tags, which may resolve to a newer Immich."
+else
+  log "Pinning compose images to the digests recorded at backup time..."
+  while read -r ref; do
+    # Skip the 'n/a' placeholders the backup writes when a digest was
+    # unavailable for an image.
+    [[ "$ref" == *"@sha256:"* ]] || continue
+    repo="${ref%%@*}"
+    sha="${ref##*@}"
+    # Docker's RepoDigests omits the implicit "docker.io/" prefix, so a Docker
+    # Hub image records as "valkey/valkey@sha256:..." while compose files
+    # normally spell it "docker.io/valkey/valkey:9". Try both spellings, and
+    # keep whichever form the compose file actually uses.
+    for cand in "$repo" "docker.io/$repo"; do
+      if grep -qE "^[[:space:]]*image:[[:space:]]*${cand}[:@]" "$COMPOSE_FILE"; then
+        # Replaces the whole tag or digest after the repo name, including a
+        # ${IMMICH_VERSION:-release} style variable.
+        sed -i -E "s|^([[:space:]]*image:[[:space:]]*)${cand}[:@][^[:space:]]*|\1${cand}@${sha}|" "$COMPOSE_FILE"
+        log "  $cand -> $sha"
+        PINNED=$((PINNED + 1))
+        break
+      fi
+    done
+  done < <(awk '/^[[:space:]]*digest:/ { print $2 }' "$STACK_DIR/versions.txt")
+
+  if [[ $PINNED -eq 0 ]]; then
+    warn "no image lines in $COMPOSE_FILE matched versions.txt; using its tags as-is."
+  else
+    log "Pinned $PINNED image(s)."
+  fi
+fi
+
 log "Pulling images and creating containers (NOT starting the stack)..."
-dc pull
+if ! dc pull; then
+  if [[ $PINNED -gt 0 ]]; then
+    die "image pull failed while pinned to the backed-up digests.
+       Those exact builds have most likely been removed from the registry.
+       Re-run with --no-pin to use current tags instead, accepting that you
+       will get a newer Immich than this dump came from:
+         $0 --host $TARGET_HOST --path $RESTORE_PATH --snapshot $SNAPSHOT --no-pin"
+  fi
+  die "image pull failed"
+fi
 dc create
 
 DB_SERVICE="$(dc config --services | grep -E '^(database|postgres|db)$' | head -1 || true)"

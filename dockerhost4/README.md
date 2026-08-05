@@ -12,6 +12,10 @@ file, `.env` and the running image tags live in `/opt/immich-taco/immich-app`,
 outside `/mnt/fileserver4`, so nothing in a snapshot would otherwise tell you
 what `DB_PASSWORD` was or which Immich build the dump came from.
 
+> **Recovering right now?** Go straight to **[restore.md](restore.md)**. It
+> covers the full "the VM is gone" procedure, and also the much smaller job of
+> pulling a single deleted photo back out of a snapshot.
+
 This is **snapshot-style, not mirror-only**: every run writes a new dated
 folder (`fileserver4-snapshots/YYYY-MM-DD/`), hardlinking anything unchanged
 from the previous night so it doesn't cost a full extra copy each time. A bad
@@ -190,10 +194,11 @@ total size is 141,045,744,229  speedup is 1.06
   i.e. the live Postgres data directory sits alongside the compose file, and
   copying that would be gigabytes of redundant, crash-inconsistent data when
   we already have a clean logical dump.
-- Restoring a specific day: just copy files out of
-  `fileserver4-snapshots/<date>/` and use the matching `immich_db_<date>.sql.gz`.
-  Each dated folder is a complete, independent tree (thanks to hardlinking,
-  not a diff you need to replay against other nights).
+- Restoring: see **[restore.md](restore.md)** for the full procedure, run by
+  `restore-immich.sh`. The short version is that each dated folder is a
+  complete, independent tree (thanks to hardlinking, not a diff you need to
+  replay against other nights), so pulling individual files back out is just
+  a copy, with no database or containers involved.
 - Not included: `/mnt/bobnology` (Synology at 10.10.10.185). It wasn't
   selected for this round since it's already external storage in its own
   right.
@@ -207,3 +212,50 @@ total size is 141,045,744,229  speedup is 1.06
 - The `immichbackup` NAS account is in the `administrators` group (created
   that way for rsync/SMB access during setup). Worth a look later at whether
   it can be scoped down to just read/write on the `backups` shared folder.
+
+## Considered, not done
+
+Raised while building this and deliberately left alone. None are bugs; each is
+an open question with a real cost attached, recorded so they don't get
+rediscovered from scratch later.
+
+- **Keep local copies of the Docker images.** `restore-immich.sh` pins to the
+  digests in `versions.txt`, which is exact but still depends on GitHub's
+  registry still hosting those builds on the day you need them. Realistically
+  that's safe for a year or two and a coin flip at five. `docker save` writes
+  the actual image bytes to a file we control (~3-5GB for the whole stack,
+  against a 133GB library, so cheap). It would be wasteful nightly since the
+  images rarely change, but the script could save them only when a digest
+  differs from the previous night's, which in practice is a few times a year.
+  Note this only matters for restoring an *old* snapshot as a running system;
+  see the point below about what old snapshots are actually for.
+- **Nothing alerts on failure.** The `ERR` trap writes to the log and exits
+  non-zero, but no one is told. A broken mount, an unreachable NAS, or a
+  failed dump would simply mean no backup that night, silently, until someone
+  happened to look. A healthchecks.io ping or a mail-on-failure would close
+  this. Currently the only detection is noticing the absence of a new dated
+  folder.
+- **No restore has actually been performed.** Until one has, this is a backup
+  system that is only theoretically a restore system. The intended proof is
+  standing up a clean VM and running `restore-immich.sh` against it end to
+  end.
+- **The mount's credentials file, if it has one.** `/etc/fstab` is captured,
+  but not any separate credentials file it references (e.g. a CIFS
+  `credentials=/root/.smbcreds`). If the fileserver4 mount needs one, a
+  rebuild has the mount definition but not the secret satisfying it.
+- **Whether Immich uses External Libraries is unconfirmed.** If it does,
+  those paths depend on extra volume mounts in the compose file, and a restore
+  onto different storage would need them replicated. Everything in the managed
+  `UPLOAD_LOCATION` tree is already handled; this is only about libraries
+  Immich indexes in place.
+
+Worth knowing when weighing the first point: restoring a *five-year-old*
+snapshot as a running system is not really the use case. Old snapshots exist
+so you can retrieve a photo deleted years ago, and for that the database and
+the Immich version are irrelevant, since the files are plain files sitting in
+`fileserver4-snapshots/<date>/`. Full-system restores realistically come from
+recent snapshots, where image availability isn't in question.
+
+Already noted above and still open: the `immichbackup` account's
+`administrators` membership, logrotate for `/var/log/immich-backup.log`, and
+replacing cron with a systemd timer to survive the machine being off at 3am.
