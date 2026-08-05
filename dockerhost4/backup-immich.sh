@@ -18,11 +18,12 @@
 #      backup method), dated + gzipped ->
 #      /volume1/backups/immich/db/immich_db_YYYY-MM-DD.sql.gz
 #   2. The Immich stack's own config (compose file, .env, resolved image
-#      tags), dated ->
+#      tags) plus /etc/fstab, dated ->
 #      /volume1/backups/hostconfig/YYYY-MM-DD/
 #      None of this lives under /mnt/fileserver4, so without it a
 #      "the whole VM is gone" restore would have the photos and the
-#      database but nothing to run them in.
+#      database but nothing to run them in. fstab is captured for reference
+#      only (it records how fileserver4 was mounted); nothing replays it.
 #   3. The entire /mnt/fileserver4 mount, dated ->
 #      /volume1/backups/fileserver4-snapshots/YYYY-MM-DD/
 #      (Immich's UPLOAD_LOCATION is /mnt/fileserver4/immich/uploads, i.e.
@@ -160,6 +161,28 @@ for f in "${CONFIG_FILES[@]}"; do
     "cat > '$HOSTCONFIG_DIR/$f.tmp' && mv '$HOSTCONFIG_DIR/$f.tmp' '$HOSTCONFIG_DIR/$f' && chmod 600 '$HOSTCONFIG_DIR/$f'" \
     < "$IMMICH_DIR/$f"
 done
+
+# /etc/fstab, captured for REFERENCE ONLY and never replayed automatically.
+# dockerhost4 mounts fileserver4 via fstab, and that line is the one piece of
+# host setup that would otherwise have to be reconstructed from memory during
+# a rebuild. It is deliberately not something restore-immich.sh applies: the
+# machine being restored onto may have entirely different storage, and
+# blindly writing someone else's mount table is a good way to make a host
+# fail to boot.
+#
+# Note this captures the fstab line but NOT any separate credentials file it
+# points at (e.g. a CIFS `credentials=/root/.smbcreds`). If the mount needs
+# one, that file has to be recreated by hand.
+if [[ -f /etc/fstab ]]; then
+  ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" \
+    "cat > '$HOSTCONFIG_DIR/fstab.tmp' && mv '$HOSTCONFIG_DIR/fstab.tmp' '$HOSTCONFIG_DIR/fstab' && chmod 600 '$HOSTCONFIG_DIR/fstab'" \
+    < /etc/fstab
+  # Only used for the summary line below at this point, so appending the
+  # source here rather than a bare filename keeps that output unambiguous.
+  CONFIG_FILES+=("fstab(/etc)")
+else
+  log "  NOTE: /etc/fstab not found, skipping"
+fi
 
 # Resolved image tags AND digests. `:release` is a moving tag, so knowing
 # only the tag doesn't tell a future restore which build was actually
